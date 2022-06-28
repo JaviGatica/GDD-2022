@@ -1,0 +1,150 @@
+/*Realizar una consulta SQL que retorne: 
+	Año (OK)
+	Cantidad de productos compuestos vendidos en el Año 
+	Cantidad de facturas realizadas en el Año (OK)
+	Monto total facturado en el Año (OK)
+	Monto total facturado en el Año anterior.
+
+Considerar:
+	Aquellos Años donde la cantidad de unidades vendidas de todos los artículos sea mayor a 1000. (OK)
+	Ordenar el resultado por cantidad vendida en el año (OK)
+
+NOTA: No se permite el uso de sub-selects en el FROM ni funciones definidas por el usuario para este punto.
+*/
+
+select * from Item_Factura join Composicion on item_producto = comp_producto
+
+select YEAR(f.fact_fecha),
+		coalesce((SELECT sum(item_cantidad) FROM Item_Factura
+		join Factura on item_numero+item_sucursal+item_tipo = fact_numero+fact_sucursal+fact_tipo
+		where YEAR(fact_fecha) = YEAR(f.fact_fecha) and item_producto in (select distinct comp_producto from Composicion)),0) cantidadProdsComposicion,
+		count(distinct fact_numero+fact_sucursal+fact_tipo) facturasAño,
+		(select sum(fact_total) from Factura where YEAR(fact_fecha) = YEAR(f.fact_fecha)) totalFacturado ,
+		(SELECT SUM(fact_total) FROM Factura WHERE YEAR(fact_fecha) = YEAR(f.fact_fecha) - 1) totalFacturadoAñoAnterior
+
+from Item_Factura i
+join Factura f on i.item_numero+i.item_sucursal+i.item_tipo = fact_numero+fact_sucursal+fact_tipo
+where YEAR(fact_fecha) in (
+				select distinct YEAR(fact_fecha)
+				from Factura 
+				join Item_Factura on fact_numero+fact_sucursal+fact_tipo = item_numero+item_sucursal+item_tipo
+				group by item_producto,  YEAR(fact_fecha)
+				having sum(item_cantidad) > 1000
+						)
+group by YEAR(fact_fecha)
+order by sum(item_cantidad) desc
+
+
+
+/*
+Realizar un stored procedure que 
+	Objetivo:
+		Inserte un nuevo registro de factura y un ítem
+	Parametros:
+		Todos los datos obligatorios de las 2 tablas, la fecha y un código de depósito
+	Consideraciones:
+		Guardar solo los valores no nulos en ambas tablas
+		Restar el stock de ese producto en la tabla correspondiente
+		Se debe validar previamente la existencia del stock en ese depósito y en caso de no haber no realizar nada.
+		El total de factura se calcula como el precio de ese único ítem
+		Los impuestos es el 21% de dicho valor redondeado a 2 decimales.
+
+Se debe programar una transacción para que las 3 operaciones se realicen atómicamente, se asume que todos los parámetros recibidos están validados a excepción de la cantidad del producto en stock.
+Queda a criterio del alumno, que acciones tomar en caso de que no se cumpla la única validación o se produzca un error no previsto.*/
+
+
+
+exec pr_parcial_ej3 'A', '0003','00000033', '2009-01-23 00:00:00', 3, '01634', '00000000', 100;
+
+
+
+
+
+select * from Producto where prod_codigo = '00000000'
+
+
+update STOCK set stoc_cantidad = 125 where  stoc_deposito = '00' and stoc_producto = '00000000'
+
+delete from Item_Factura where item_tipo+item_sucursal+item_numero = 'A000300000033'
+delete from Factura where fact_tipo+fact_sucursal+fact_numero = 'A000300000033'
+
+
+select * from STOCK where stoc_producto = '00000000'
+SELECT * FROM Factura WHERE fact_tipo+fact_sucursal+fact_numero = 'A000300000033'
+select * from Item_Factura where item_tipo+item_sucursal+item_numero = 'A000300000033'
+
+
+create PROCEDURE pr_parcial_ej3 (@tipo char(1), @sucursal char(4), @numero char(8), @fecha smalldatetime, @vendedor numeric(6,0),
+				 @cliente char(6), @producto char(8), @cantidad decimal(12,2)) AS
+BEGIN
+	
+	IF @tipo is null or @sucursal is null or @numero is null or @fecha is null or @vendedor is null or @cliente is null or @producto is null 
+			or @cantidad is null
+	BEGIN
+		RAISERROR ('no se pueden ingresar valores nulos',1,1)
+		return;
+	END
+
+
+
+	if not exists (select sum(stoc_cantidad) from STOCK where stoc_producto = @producto group by stoc_producto having sum(stoc_cantidad) > @cantidad)
+	begin
+		raiserror ('No alcanza el stock',1,1)
+		return;
+	end
+	begin
+
+		declare @remanente decimal(12,2)
+		declare @deposito char(2)
+		declare @monto decimal(12,2)
+
+		set @remanente = @cantidad
+		BEGIN TRANSACTION
+					DECLARE @precio decimal(12,2)
+			DECLARE @impuestos decimal(12,2)
+
+			select @precio = prod_precio from Producto where prod_codigo = @producto
+			select @impuestos = CAST((@precio * 0.21) as decimal(12,2))
+
+			
+
+			INSERT Factura VALUES
+				(@tipo, @sucursal, @numero, @fecha, @vendedor, @precio, @impuestos, @cliente)
+
+			INSERT Item_Factura VALUES
+				(@tipo, @sucursal, @numero, @producto, @cantidad, @precio)
+
+		declare cursor_stock cursor for 
+			select stoc_deposito , stoc_cantidad from STOCK where stoc_producto = @producto
+
+		open cursor_stock
+		fetch next from cursor_stock into @deposito, @monto
+		
+		while @@FETCH_STATUS = 0 and @remanente > 0
+		begin
+			
+			if @monto >= @remanente
+			begin
+				update STOCK
+					set stoc_cantidad = stoc_cantidad - @cantidad where stoc_deposito = @deposito and stoc_producto = @producto
+
+				set @remanente = 0
+			end
+			else
+			begin
+				update STOCK
+					set stoc_cantidad = 0 where stoc_deposito = @deposito and stoc_producto = @producto
+
+				set @remanente = @remanente - @monto
+			end
+
+			fetch next from cursor_stock into @deposito, @monto
+		end
+		close cursor_stock
+		deallocate cursor_stock
+			
+		COMMIT TRANSACTION
+	end
+END
+
+
